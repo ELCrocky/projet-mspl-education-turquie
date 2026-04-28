@@ -1,4 +1,4 @@
 # projet-mspl-education-turquie
 
-## Omer GIZBILI
-## Kaan Mert SEVINC
+## Omer GIZBILI      12308674
+## Kaan Mert SEVINC  12115973

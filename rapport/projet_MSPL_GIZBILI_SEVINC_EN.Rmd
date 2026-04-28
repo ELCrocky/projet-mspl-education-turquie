@@ -1,0 +1,552 @@
+---
+title: "Turkey in Comparison: GDP, Education and Inequality Against Neighbours and Europe (1990-2020)"
+author: "Omer GIZBILI & Kaan Mert SEVINC"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    number_sections: true
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 12,
+  fig.height = 7
+)
+```
+
+```{r libraries}
+# Core libraries
+library(tidyverse)  # data manipulation and visualization
+library(knitr)      # report generation
+library(kableExtra) # formatted tables
+library(scales)     # axis formatting
+library(zoo)        # linear interpolation for missing values
+```
+
+---
+
+# Introduction
+
+## Context
+
+This project analyzes Turkey's economic and social development between 1990 and 2020,
+comparing it to its direct neighbours and five major European economies. We focus on
+three key indicators: GDP per capita, mean years of schooling, and the Gini coefficient
+(income inequality).
+
+**Research question:**
+*How does Turkey's economic development and social indicators compare to its neighbours
+and major European economies between 1990 and 2020?*
+
+## Data Sources
+
+We use three datasets from **Our World in Data**, all sourced from major international institutions:
+
+| Dataset | Source | Period | Coverage |
+|---|---|---|---|
+| GDP per capita (PPP, 2021 USD) | World Bank | 1990–2024 | 234 countries |
+| Mean years of schooling | Lee & Lee (2016) | 1870–2020 | 188 countries |
+| Gini coefficient | Luxembourg Income Study | 1967–2021 | 169 countries |
+
+## Description of Variables
+
+- **GDP per capita**: Average economic output per person, adjusted for inflation and purchasing power parity (PPP). Expressed in constant 2021 international dollars.
+- **Mean years of schooling**: Average number of years of education received by people aged 25 and older.
+- **Gini coefficient**: Measures income inequality on a scale from 0 (perfect equality) to 1 (maximum inequality).
+
+---
+
+# Methodology
+
+## Data Loading
+
+```{r load-data}
+# Load the three raw CSV files
+# Paths are relative to the rapport/ folder
+gdp_raw  <- read_csv("../data/raw/gdp-per-capita-worldbank.csv")
+edu_raw  <- read_csv("../data/raw/mean-years-of-schooling-long-run.csv")
+gini_raw <- read_csv("../data/raw/economic-inequality-gini-index.csv")
+```
+
+## Data Characterization
+
+```{r characterization}
+# Overview of each dataset: dimensions, countries, time span
+datasets <- list(
+  "GDP per capita"       = gdp_raw,
+  "Years of schooling"   = edu_raw,
+  "Gini coefficient"     = gini_raw
+)
+
+carac <- map_dfr(datasets, function(df) {
+  tibble(
+    Rows      = nrow(df),
+    Columns   = ncol(df),
+    Countries = n_distinct(df$Entity),
+    Year_min  = min(df$Year, na.rm = TRUE),
+    Year_max  = max(df$Year, na.rm = TRUE)
+  )
+}, .id = "Dataset")
+
+kable(carac, caption = "Characterization of the three datasets") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Data Quality Assessment
+
+```{r missing-global}
+# Missing values per dataset
+missing_report <- map_dfr(datasets, function(df) {
+  df %>%
+    summarise(across(everything(), ~ sum(is.na(.)))) %>%
+    pivot_longer(everything(),
+                 names_to  = "Variable",
+                 values_to = "Missing_values")
+}, .id = "Dataset")
+
+kable(missing_report, caption = "Missing values per variable") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Data Cleaning and Integration
+
+### Step 1 — Build the complete dataset (left_join)
+
+```{r complete-data}
+# We join the three datasets on Entity and Year
+# left_join keeps all GDP rows and adds schooling/gini where available
+# This preserves all country-year combinations from the GDP dataset
+complete_data <- gdp_raw %>%
+  rename(gdp = `GDP per capita`) %>%
+  select(Entity, Year, gdp) %>%
+  left_join(
+    edu_raw %>%
+      rename(schooling = `Average years of schooling`) %>%
+      select(Entity, Year, schooling),
+    by = c("Entity", "Year")
+  ) %>%
+  left_join(
+    gini_raw %>%
+      rename(gini = `Gini coefficient`) %>%
+      select(Entity, Year, gini),
+    by = c("Entity", "Year")
+  )
+
+cat("Complete dataset dimensions:", nrow(complete_data), "rows x", ncol(complete_data), "columns\n")
+cat("Countries:", n_distinct(complete_data$Entity), "\n")
+cat("Years:", min(complete_data$Year), "to", max(complete_data$Year), "\n")
+```
+
+### Step 2 — Define the country list
+
+```{r countries}
+# Turkey + 8 neighbours + 5 major European economies
+countries <- c(
+  "Turkey",
+  # Neighbours
+  "Greece", "Bulgaria", "Georgia", "Armenia", "Azerbaijan",
+  "Iran", "Iraq", "Syria",
+  # Major European economies
+  "Spain", "United Kingdom", "France", "Germany", "Italy"
+)
+
+cat("Total countries selected:", length(countries), "\n")
+```
+
+### Step 3 — Filter the analysis dataset
+
+```{r analysis-data}
+# Keep only selected countries and years 1990-2020
+analysis_data <- complete_data %>%
+  filter(Entity %in% countries,
+         Year >= 1990, Year <= 2020)
+
+cat("Analysis dataset:", nrow(analysis_data), "rows\n")
+```
+
+### Step 4 — Data coverage per country
+
+```{r coverage}
+# How many non-missing observations per country per variable?
+coverage <- analysis_data %>%
+  group_by(Entity) %>%
+  summarise(
+    n_gdp       = sum(!is.na(gdp)),
+    n_schooling = sum(!is.na(schooling)),
+    n_gini      = sum(!is.na(gini))
+  ) %>%
+  arrange(desc(n_gdp))
+
+kable(coverage,
+      caption = "Data coverage per country (1990-2020)",
+      col.names = c("Country", "GDP observations", "Schooling observations", "Gini observations")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Observations:**
+
+- GDP data is complete for all 14 countries (31 observations each).
+- Schooling data is available roughly every 5 years; Azerbaijan and Georgia have no data.
+- Gini data is highly incomplete for Iraq (2 obs.), Syria (4 obs.), and Azerbaijan (6 obs.).
+
+---
+
+# Analysis
+
+## GDP per Capita
+
+### All countries
+
+```{r plot-all-gdp}
+# All 14 countries, linetype distinguishes groups
+# Turkey is highlighted with a solid line
+analysis_data %>%
+  mutate(group = ifelse(Entity == "Turkey", "Turkey",
+                 ifelse(Entity %in% c("Greece", "Bulgaria", "Georgia",
+                                       "Armenia", "Azerbaijan", "Iran",
+                                       "Iraq", "Syria"),
+                        "Neighbour", "Europe"))) %>%
+  ggplot(aes(x = Year, y = gdp, color = Entity, linetype = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(data = . %>% filter(Year %in% c(1990, 1995, 2000, 2005, 2010, 2015, 2020)),
+             size = 2) +
+  scale_y_continuous(labels = label_dollar(big.mark = ","),
+                     breaks = seq(0, 60000, by = 5000)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  scale_linetype_manual(values = c("Turkey" = "solid",
+                                   "Neighbour" = "dashed",
+                                   "Europe" = "dotted")) +
+  labs(title   = "GDP per capita — Turkey vs Neighbours & Europe (1990-2020)",
+       x       = "Year", y = "GDP per capita (USD)",
+       color   = "Country", linetype = "Group",
+       caption = "Source: World Bank via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turkey vs Neighbours
+
+```{r plot-neighbours-gdp}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Greece", "Bulgaria", "Georgia",
+                        "Armenia", "Azerbaijan", "Iran", "Iraq", "Syria")) %>%
+  ggplot(aes(x = Year, y = gdp, color = Entity)) +
+  geom_line(linewidth = 1) +
+  geom_point(data = . %>% filter(Year %in% c(1990, 1995, 2000, 2005, 2010, 2015, 2020)),
+             size = 3) +
+  scale_y_continuous(labels = label_dollar(big.mark = ","),
+                     breaks = seq(0, 40000, by = 5000)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "GDP per capita — Turkey vs Neighbours (1990-2020)",
+       x       = "Year", y = "GDP per capita (USD)", color = "Country",
+       caption = "Source: World Bank via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turkey vs Europe
+
+```{r plot-europe-gdp}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Spain", "United Kingdom",
+                        "France", "Germany", "Italy")) %>%
+  ggplot(aes(x = Year, y = gdp, color = Entity)) +
+  geom_line(linewidth = 1) +
+  geom_point(data = . %>% filter(Year %in% c(1990, 1995, 2000, 2005, 2010, 2015, 2020)),
+             size = 3) +
+  scale_y_continuous(labels = label_dollar(big.mark = ","),
+                     breaks = seq(0, 60000, by = 5000)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "GDP per capita — Turkey vs Europe (1990-2020)",
+       x       = "Year", y = "GDP per capita (USD)", color = "Country",
+       caption = "Source: World Bank via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+## Mean Years of Schooling
+
+### All countries
+
+```{r plot-all-schooling}
+analysis_data %>%
+  filter(!is.na(schooling)) %>%
+  mutate(group = ifelse(Entity == "Turkey", "Turkey",
+                 ifelse(Entity %in% c("Greece", "Bulgaria", "Georgia",
+                                       "Armenia", "Azerbaijan", "Iran",
+                                       "Iraq", "Syria"),
+                        "Neighbour", "Europe"))) %>%
+  ggplot(aes(x = Year, y = schooling, color = Entity, linetype = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  scale_linetype_manual(values = c("Turkey" = "solid",
+                                   "Neighbour" = "dashed",
+                                   "Europe" = "dotted")) +
+  labs(title   = "Mean years of schooling — Turkey vs Neighbours & Europe (1990-2020)",
+       x       = "Year", y = "Mean years of schooling",
+       color   = "Country", linetype = "Group",
+       caption = "Source: Lee & Lee (2016) via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turkey vs Neighbours
+
+```{r plot-neighbours-schooling}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Greece", "Bulgaria", "Georgia",
+                        "Armenia", "Azerbaijan", "Iran", "Iraq", "Syria"),
+         !is.na(schooling)) %>%
+  ggplot(aes(x = Year, y = schooling, color = Entity)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "Mean years of schooling — Turkey vs Neighbours (1990-2020)",
+       x       = "Year", y = "Mean years of schooling", color = "Country",
+       caption = "Source: Lee & Lee (2016) via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turkey vs Europe
+
+```{r plot-europe-schooling}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Spain", "United Kingdom",
+                        "France", "Germany", "Italy"),
+         !is.na(schooling)) %>%
+  ggplot(aes(x = Year, y = schooling, color = Entity)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "Mean years of schooling — Turkey vs Europe (1990-2020)",
+       x       = "Year", y = "Mean years of schooling", color = "Country",
+       caption = "Source: Lee & Lee (2016) via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+## Gini Coefficient
+
+Missing values are interpolated linearly using `zoo::na.approx()` to allow continuous
+line plotting. Original missing values are preserved in `analysis_data`.
+
+### All countries
+
+```{r plot-all-gini}
+analysis_data %>%
+  mutate(group = ifelse(Entity == "Turkey", "Turkey",
+                 ifelse(Entity %in% c("Greece", "Bulgaria", "Georgia",
+                                       "Armenia", "Azerbaijan", "Iran",
+                                       "Iraq", "Syria"),
+                        "Neighbour", "Europe"))) %>%
+  group_by(Entity) %>%
+  mutate(gini = zoo::na.approx(gini, na.rm = FALSE)) %>%
+  ungroup() %>%
+  ggplot(aes(x = Year, y = gini, color = Entity, linetype = group)) +
+  geom_line(linewidth = 1, na.rm = TRUE) +
+  geom_point(data = . %>% filter(!is.na(gini)), size = 2) +
+  scale_y_continuous(breaks = seq(0, 0.6, by = 0.05)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  scale_linetype_manual(values = c("Turkey" = "solid",
+                                   "Neighbour" = "dashed",
+                                   "Europe" = "dotted")) +
+  labs(title   = "Gini coefficient — Turkey vs Neighbours & Europe (1990-2020)",
+       x       = "Year", y = "Gini coefficient",
+       color   = "Country", linetype = "Group",
+       caption = "Source: Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turkey vs Neighbours
+
+```{r plot-neighbours-gini}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Greece", "Bulgaria", "Georgia",
+                        "Armenia", "Azerbaijan", "Iran", "Iraq", "Syria")) %>%
+  group_by(Entity) %>%
+  mutate(gini = zoo::na.approx(gini, na.rm = FALSE)) %>%
+  ungroup() %>%
+  ggplot(aes(x = Year, y = gini, color = Entity)) +
+  geom_line(linewidth = 1, na.rm = TRUE) +
+  geom_point(data = . %>% filter(!is.na(gini)), size = 3) +
+  scale_y_continuous(breaks = seq(0, 0.6, by = 0.05)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "Gini coefficient — Turkey vs Neighbours (1990-2020)",
+       x       = "Year", y = "Gini coefficient", color = "Country",
+       caption = "Source: Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turkey vs Europe
+
+```{r plot-europe-gini}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Spain", "United Kingdom",
+                        "France", "Germany", "Italy")) %>%
+  group_by(Entity) %>%
+  mutate(gini = zoo::na.approx(gini, na.rm = FALSE)) %>%
+  ungroup() %>%
+  ggplot(aes(x = Year, y = gini, color = Entity)) +
+  geom_line(linewidth = 1, na.rm = TRUE) +
+  geom_point(data = . %>% filter(!is.na(gini)), size = 3) +
+  scale_y_continuous(breaks = seq(0, 0.6, by = 0.05)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "Gini coefficient — Turkey vs Europe (1990-2020)",
+       x       = "Year", y = "Gini coefficient", color = "Country",
+       caption = "Source: Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+## Correlation Analysis
+
+```{r correlation}
+# Overall correlations across all 14 countries
+cat("=== Overall correlations ===\n")
+cat("GDP ~ Schooling:", round(cor(analysis_data$gdp, analysis_data$schooling, use = "complete.obs"), 3), "\n")
+cat("GDP ~ Gini:     ", round(cor(analysis_data$gdp, analysis_data$gini,      use = "complete.obs"), 3), "\n\n")
+
+# Per-country correlations (only for countries with at least 3 data points)
+cor_table <- analysis_data %>%
+  group_by(Entity) %>%
+  summarise(
+    cor_gdp_schooling = ifelse(sum(!is.na(schooling)) >= 3,
+                               round(cor(gdp, schooling, use = "complete.obs"), 3), NA),
+    cor_gdp_gini      = ifelse(sum(!is.na(gini)) >= 3,
+                               round(cor(gdp, gini, use = "complete.obs"), 3), NA)
+  )
+
+kable(cor_table,
+      caption = "Pearson correlations per country",
+      col.names = c("Country", "GDP ~ Schooling", "GDP ~ Gini")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  row_spec(which(cor_table$Entity == "Turkey"), bold = TRUE, background = "#fff3f3")
+```
+
+**Key observations:**
+
+- Turkey shows a very strong positive correlation between GDP and schooling (r = 0.972), similar to France (0.973), Germany (0.963) and Iran (0.967).
+- The GDP ~ Gini correlation for Turkey (0.449) suggests that economic growth was accompanied by a moderate increase in inequality.
+- Syria shows a negative GDP ~ Schooling correlation (-0.263), likely due to the collapse of GDP during the civil war while education metrics remained relatively stable.
+
+## Regression Analysis
+
+### Model 1 — GDP ~ Schooling
+
+```{r model-schooling}
+# Simple linear regression: does education predict GDP?
+model_schooling <- lm(gdp ~ schooling, data = analysis_data)
+summary(model_schooling)
+```
+
+**Interpretation:** Each additional year of schooling is associated with an average increase
+of **$5,780** in GDP per capita. The model explains **60.4%** of the variance in GDP (R² = 0.604).
+The p-value is extremely small (< 2.2e-16), confirming the statistical significance.
+
+### Model 2 — GDP ~ Gini
+
+```{r model-gini}
+# Simple linear regression: does inequality predict GDP?
+model_gini <- lm(gdp ~ gini, data = analysis_data)
+summary(model_gini)
+```
+
+**Interpretation:** The Gini coefficient alone explains only **15.9%** of GDP variance (R² = 0.159).
+The negative coefficient (-177,033) suggests that higher inequality is associated with lower GDP,
+but the model's explanatory power is weak.
+
+### Model 3 — GDP ~ Schooling + Gini
+
+```{r model-full}
+# Multiple regression: both variables together
+model_full <- lm(gdp ~ schooling + gini, data = analysis_data)
+summary(model_full)
+```
+
+**Interpretation:** When combining both variables, R² drops to **0.440** compared to Model 1.
+This is because many observations with Gini data are missing, reducing the sample size from
+79 to 51 observations. Schooling remains highly significant (p < 0.001) while Gini is not
+significant (p = 0.116) when controlling for schooling.
+
+---
+
+# Conclusion
+
+This analysis compared Turkey's GDP per capita, educational attainment, and income inequality
+against its neighbours and five major European economies over the period 1990–2020.
+
+**Main findings:**
+
+- Turkey's GDP per capita grew significantly over the period, surpassing most of its neighbours
+  but remaining well below the major European economies.
+- Turkey's mean years of schooling increased steadily, reflecting sustained public investment
+  in education. By 2020, Turkey's educational level was comparable to Iran and Bulgaria,
+  but still below Greece and the European economies.
+- Turkey's Gini coefficient remained relatively high (around 0.40–0.43) compared to European
+  countries, indicating persistent income inequality despite economic growth.
+- Regression analysis confirms that education is the strongest predictor of GDP per capita
+  in this sample (R² = 0.604, p < 0.001), with each additional year of schooling associated
+  with approximately $5,780 in additional GDP per capita.
+
+**Limitations:**
+
+- Schooling data is only available every 5 years; linear interpolation was used for visualization.
+- Gini data is highly incomplete for several countries (Azerbaijan, Iraq, Syria).
+- Correlation and regression do not imply causality.
+- Country-level GDP per capita masks internal regional disparities.
+
+**Future directions:**
+
+- Incorporate regional data (e.g. NUTS regions for Turkey and EU countries).
+- Analyse gender gaps in education and their relation to inequality.
+- Extend the time period to 2024 using the available GDP data.
+
+---
+
+# References
+
+- Eurostat, OECD, IMF and World Bank (2026). *GDP per capita – World Bank – In constant international-$*. Our World in Data. https://ourworldindata.org/grapher/gdp-per-capita-worldbank
+
+- Lee, J.-W. and Lee, H. (2016). Human capital in the long run. *Journal of Development Economics*, 122, 147–169.
+
+- R Core Team (2024). *R: A language and environment for statistical computing*. R Foundation for Statistical Computing, Vienna, Austria.
+
+- Wickham, H. et al. (2019). Welcome to the tidyverse. *Journal of Open Source Software*, 4(43), 1686.
+
+- Zeileis, A. and Grothendieck, G. (2005). zoo: S3 infrastructure for regular and irregular time series. *Journal of Statistical Software*, 14(6), 1–27.

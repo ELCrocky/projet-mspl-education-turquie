@@ -1,0 +1,558 @@
+---
+title: "La Turquie en Comparaison : PIB, Éducation et Inégalités face aux Voisins et à l'Europe (1990-2020)"
+author: "Omer GIZBILI & Kaan Mert SEVINC"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    number_sections: true
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 12,
+  fig.height = 7
+)
+```
+
+```{r libraries}
+# Chargement des bibliothèques
+library(tidyverse)  # manipulation des données et visualisation
+library(knitr)      # génération du rapport
+library(kableExtra) # tableaux formatés
+library(scales)     # formatage des axes
+library(zoo)        # interpolation linéaire pour les valeurs manquantes
+```
+
+---
+
+# Introduction
+
+## Contexte
+
+Ce projet analyse le développement économique et social de la Turquie entre 1990 et 2020,
+en la comparant à ses voisins directs et à cinq grandes économies européennes. Nous nous
+concentrons sur trois indicateurs clés : le PIB par habitant, les années moyennes de
+scolarisation et le coefficient de Gini (inégalités de revenus).
+
+**Question de recherche :**
+*Comment le développement économique et les indicateurs sociaux de la Turquie se comparent-ils
+à ceux de ses voisins et des grandes économies européennes entre 1990 et 2020 ?*
+
+## Sources de Données
+
+Nous utilisons trois jeux de données issus de **Our World in Data**, tous provenant
+d'institutions internationales reconnues :
+
+| Jeu de données | Source | Période | Couverture |
+|---|---|---|---|
+| PIB par habitant (PPA, USD 2021) | Banque Mondiale | 1990–2024 | 234 pays |
+| Années moyennes de scolarisation | Lee & Lee (2016) | 1870–2020 | 188 pays |
+| Coefficient de Gini | Luxembourg Income Study | 1967–2021 | 169 pays |
+
+## Description des Variables
+
+- **PIB par habitant** : Production économique moyenne par personne, ajustée pour l'inflation
+  et la parité de pouvoir d'achat (PPA). Exprimé en dollars internationaux constants 2021.
+- **Années moyennes de scolarisation** : Nombre moyen d'années d'éducation reçues par les
+  personnes âgées de 25 ans et plus.
+- **Coefficient de Gini** : Mesure les inégalités de revenus sur une échelle de 0
+  (égalité parfaite) à 1 (inégalité maximale).
+
+---
+
+# Méthodologie
+
+## Chargement des Données
+
+```{r load-data}
+# Chargement des trois fichiers CSV bruts
+# Les chemins sont relatifs au dossier rapport/
+gdp_raw  <- read_csv("../data/raw/gdp-per-capita-worldbank.csv")
+edu_raw  <- read_csv("../data/raw/mean-years-of-schooling-long-run.csv")
+gini_raw <- read_csv("../data/raw/economic-inequality-gini-index.csv")
+```
+
+## Caractérisation des Données
+
+```{r characterization}
+# Vue d'ensemble de chaque jeu de données : dimensions, pays, période
+datasets <- list(
+  "PIB par habitant"          = gdp_raw,
+  "Années de scolarisation"   = edu_raw,
+  "Coefficient de Gini"       = gini_raw
+)
+
+carac <- map_dfr(datasets, function(df) {
+  tibble(
+    Lignes  = nrow(df),
+    Colonnes = ncol(df),
+    Pays    = n_distinct(df$Entity),
+    An_min  = min(df$Year, na.rm = TRUE),
+    An_max  = max(df$Year, na.rm = TRUE)
+  )
+}, .id = "Jeu de données")
+
+kable(carac, caption = "Caractérisation des trois jeux de données") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Évaluation de la Qualité des Données
+
+```{r missing-global}
+# Valeurs manquantes par jeu de données
+missing_report <- map_dfr(datasets, function(df) {
+  df %>%
+    summarise(across(everything(), ~ sum(is.na(.)))) %>%
+    pivot_longer(everything(),
+                 names_to  = "Variable",
+                 values_to = "Valeurs_manquantes")
+}, .id = "Jeu de données")
+
+kable(missing_report, caption = "Valeurs manquantes par variable") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Nettoyage et Intégration des Données
+
+### Étape 1 — Construction du dataset complet (left_join)
+
+```{r complete-data}
+# Jointure des trois datasets sur Entity et Year
+# left_join conserve toutes les lignes du GDP et ajoute schooling/gini quand disponible
+# Cela préserve toutes les combinaisons pays-année du dataset GDP
+complete_data <- gdp_raw %>%
+  rename(gdp = `GDP per capita`) %>%
+  select(Entity, Year, gdp) %>%
+  left_join(
+    edu_raw %>%
+      rename(schooling = `Average years of schooling`) %>%
+      select(Entity, Year, schooling),
+    by = c("Entity", "Year")
+  ) %>%
+  left_join(
+    gini_raw %>%
+      rename(gini = `Gini coefficient`) %>%
+      select(Entity, Year, gini),
+    by = c("Entity", "Year")
+  )
+
+cat("Dimensions du dataset complet :", nrow(complete_data), "lignes x", ncol(complete_data), "colonnes\n")
+cat("Pays :", n_distinct(complete_data$Entity), "\n")
+cat("Années :", min(complete_data$Year), "à", max(complete_data$Year), "\n")
+```
+
+### Étape 2 — Définition de la liste des pays
+
+```{r countries}
+# Turquie + 8 voisins + 5 grandes économies européennes
+countries <- c(
+  "Turkey",
+  # Voisins
+  "Greece", "Bulgaria", "Georgia", "Armenia", "Azerbaijan",
+  "Iran", "Iraq", "Syria",
+  # Grandes économies européennes
+  "Spain", "United Kingdom", "France", "Germany", "Italy"
+)
+
+cat("Nombre total de pays sélectionnés :", length(countries), "\n")
+```
+
+### Étape 3 — Filtrage du dataset d'analyse
+
+```{r analysis-data}
+# Conservation uniquement des pays sélectionnés et des années 1990-2020
+analysis_data <- complete_data %>%
+  filter(Entity %in% countries,
+         Year >= 1990, Year <= 2020)
+
+cat("Dataset d'analyse :", nrow(analysis_data), "lignes\n")
+```
+
+### Étape 4 — Couverture des données par pays
+
+```{r coverage}
+# Combien d'observations non manquantes par pays et par variable ?
+coverage <- analysis_data %>%
+  group_by(Entity) %>%
+  summarise(
+    n_gdp       = sum(!is.na(gdp)),
+    n_schooling = sum(!is.na(schooling)),
+    n_gini      = sum(!is.na(gini))
+  ) %>%
+  arrange(desc(n_gdp))
+
+kable(coverage,
+      caption = "Couverture des données par pays (1990-2020)",
+      col.names = c("Pays", "Obs. PIB", "Obs. Scolarisation", "Obs. Gini")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Observations :**
+
+- Les données GDP sont complètes pour les 14 pays (31 observations chacun).
+- Les données de scolarisation sont disponibles environ tous les 5 ans ; l'Azerbaïdjan et la Géorgie n'ont aucune donnée.
+- Les données Gini sont très incomplètes pour l'Irak (2 obs.), la Syrie (4 obs.) et l'Azerbaïdjan (6 obs.).
+
+---
+
+# Analyse
+
+## PIB par Habitant
+
+### Tous les pays
+
+```{r plot-all-gdp}
+# Les 14 pays, le type de ligne distingue les groupes
+# La Turquie est mise en valeur avec une ligne continue
+analysis_data %>%
+  mutate(group = ifelse(Entity == "Turkey", "Turkey",
+                 ifelse(Entity %in% c("Greece", "Bulgaria", "Georgia",
+                                       "Armenia", "Azerbaijan", "Iran",
+                                       "Iraq", "Syria"),
+                        "Voisin", "Europe"))) %>%
+  ggplot(aes(x = Year, y = gdp, color = Entity, linetype = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(data = . %>% filter(Year %in% c(1990, 1995, 2000, 2005, 2010, 2015, 2020)),
+             size = 2) +
+  scale_y_continuous(labels = label_dollar(big.mark = ","),
+                     breaks = seq(0, 60000, by = 5000)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  scale_linetype_manual(values = c("Turkey" = "solid",
+                                   "Voisin" = "dashed",
+                                   "Europe" = "dotted")) +
+  labs(title   = "PIB par habitant — Turquie vs Voisins & Europe (1990-2020)",
+       x       = "Année", y = "PIB par habitant (USD)",
+       color   = "Pays", linetype = "Groupe",
+       caption = "Source : Banque Mondiale via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turquie vs Voisins
+
+```{r plot-neighbours-gdp}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Greece", "Bulgaria", "Georgia",
+                        "Armenia", "Azerbaijan", "Iran", "Iraq", "Syria")) %>%
+  ggplot(aes(x = Year, y = gdp, color = Entity)) +
+  geom_line(linewidth = 1) +
+  geom_point(data = . %>% filter(Year %in% c(1990, 1995, 2000, 2005, 2010, 2015, 2020)),
+             size = 3) +
+  scale_y_continuous(labels = label_dollar(big.mark = ","),
+                     breaks = seq(0, 40000, by = 5000)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "PIB par habitant — Turquie vs Voisins (1990-2020)",
+       x       = "Année", y = "PIB par habitant (USD)", color = "Pays",
+       caption = "Source : Banque Mondiale via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turquie vs Europe
+
+```{r plot-europe-gdp}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Spain", "United Kingdom",
+                        "France", "Germany", "Italy")) %>%
+  ggplot(aes(x = Year, y = gdp, color = Entity)) +
+  geom_line(linewidth = 1) +
+  geom_point(data = . %>% filter(Year %in% c(1990, 1995, 2000, 2005, 2010, 2015, 2020)),
+             size = 3) +
+  scale_y_continuous(labels = label_dollar(big.mark = ","),
+                     breaks = seq(0, 60000, by = 5000)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "PIB par habitant — Turquie vs Europe (1990-2020)",
+       x       = "Année", y = "PIB par habitant (USD)", color = "Pays",
+       caption = "Source : Banque Mondiale via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+## Années Moyennes de Scolarisation
+
+### Tous les pays
+
+```{r plot-all-schooling}
+analysis_data %>%
+  filter(!is.na(schooling)) %>%
+  mutate(group = ifelse(Entity == "Turkey", "Turkey",
+                 ifelse(Entity %in% c("Greece", "Bulgaria", "Georgia",
+                                       "Armenia", "Azerbaijan", "Iran",
+                                       "Iraq", "Syria"),
+                        "Voisin", "Europe"))) %>%
+  ggplot(aes(x = Year, y = schooling, color = Entity, linetype = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  scale_linetype_manual(values = c("Turkey" = "solid",
+                                   "Voisin" = "dashed",
+                                   "Europe" = "dotted")) +
+  labs(title   = "Années moyennes de scolarisation — Turquie vs Voisins & Europe (1990-2020)",
+       x       = "Année", y = "Années moyennes de scolarisation",
+       color   = "Pays", linetype = "Groupe",
+       caption = "Source : Lee & Lee (2016) via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turquie vs Voisins
+
+```{r plot-neighbours-schooling}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Greece", "Bulgaria", "Georgia",
+                        "Armenia", "Azerbaijan", "Iran", "Iraq", "Syria"),
+         !is.na(schooling)) %>%
+  ggplot(aes(x = Year, y = schooling, color = Entity)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "Années moyennes de scolarisation — Turquie vs Voisins (1990-2020)",
+       x       = "Année", y = "Années moyennes de scolarisation", color = "Pays",
+       caption = "Source : Lee & Lee (2016) via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turquie vs Europe
+
+```{r plot-europe-schooling}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Spain", "United Kingdom",
+                        "France", "Germany", "Italy"),
+         !is.na(schooling)) %>%
+  ggplot(aes(x = Year, y = schooling, color = Entity)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "Années moyennes de scolarisation — Turquie vs Europe (1990-2020)",
+       x       = "Année", y = "Années moyennes de scolarisation", color = "Pays",
+       caption = "Source : Lee & Lee (2016) via Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+## Coefficient de Gini
+
+Les valeurs manquantes sont interpolées linéairement avec `zoo::na.approx()` pour
+permettre un tracé continu. Les valeurs manquantes originales sont préservées dans `analysis_data`.
+
+### Tous les pays
+
+```{r plot-all-gini}
+analysis_data %>%
+  mutate(group = ifelse(Entity == "Turkey", "Turkey",
+                 ifelse(Entity %in% c("Greece", "Bulgaria", "Georgia",
+                                       "Armenia", "Azerbaijan", "Iran",
+                                       "Iraq", "Syria"),
+                        "Voisin", "Europe"))) %>%
+  group_by(Entity) %>%
+  mutate(gini = zoo::na.approx(gini, na.rm = FALSE)) %>%
+  ungroup() %>%
+  ggplot(aes(x = Year, y = gini, color = Entity, linetype = group)) +
+  geom_line(linewidth = 1, na.rm = TRUE) +
+  geom_point(data = . %>% filter(!is.na(gini)), size = 2) +
+  scale_y_continuous(breaks = seq(0, 0.6, by = 0.05)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  scale_linetype_manual(values = c("Turkey" = "solid",
+                                   "Voisin" = "dashed",
+                                   "Europe" = "dotted")) +
+  labs(title   = "Coefficient de Gini — Turquie vs Voisins & Europe (1990-2020)",
+       x       = "Année", y = "Coefficient de Gini",
+       color   = "Pays", linetype = "Groupe",
+       caption = "Source : Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turquie vs Voisins
+
+```{r plot-neighbours-gini}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Greece", "Bulgaria", "Georgia",
+                        "Armenia", "Azerbaijan", "Iran", "Iraq", "Syria")) %>%
+  group_by(Entity) %>%
+  mutate(gini = zoo::na.approx(gini, na.rm = FALSE)) %>%
+  ungroup() %>%
+  ggplot(aes(x = Year, y = gini, color = Entity)) +
+  geom_line(linewidth = 1, na.rm = TRUE) +
+  geom_point(data = . %>% filter(!is.na(gini)), size = 3) +
+  scale_y_continuous(breaks = seq(0, 0.6, by = 0.05)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "Coefficient de Gini — Turquie vs Voisins (1990-2020)",
+       x       = "Année", y = "Coefficient de Gini", color = "Pays",
+       caption = "Source : Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+### Turquie vs Europe
+
+```{r plot-europe-gini}
+analysis_data %>%
+  filter(Entity %in% c("Turkey", "Spain", "United Kingdom",
+                        "France", "Germany", "Italy")) %>%
+  group_by(Entity) %>%
+  mutate(gini = zoo::na.approx(gini, na.rm = FALSE)) %>%
+  ungroup() %>%
+  ggplot(aes(x = Year, y = gini, color = Entity)) +
+  geom_line(linewidth = 1, na.rm = TRUE) +
+  geom_point(data = . %>% filter(!is.na(gini)), size = 3) +
+  scale_y_continuous(breaks = seq(0, 0.6, by = 0.05)) +
+  scale_x_continuous(breaks = seq(1990, 2020, by = 5)) +
+  labs(title   = "Coefficient de Gini — Turquie vs Europe (1990-2020)",
+       x       = "Année", y = "Coefficient de Gini", color = "Pays",
+       caption = "Source : Our World in Data") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+```
+
+## Analyse de Corrélation
+
+```{r correlation}
+# Corrélations globales sur les 14 pays
+cat("=== Corrélations globales ===\n")
+cat("PIB ~ Scolarisation :", round(cor(analysis_data$gdp, analysis_data$schooling, use = "complete.obs"), 3), "\n")
+cat("PIB ~ Gini :         ", round(cor(analysis_data$gdp, analysis_data$gini,      use = "complete.obs"), 3), "\n\n")
+
+# Corrélations par pays (uniquement pour les pays avec au moins 3 points de données)
+cor_table <- analysis_data %>%
+  group_by(Entity) %>%
+  summarise(
+    cor_gdp_schooling = ifelse(sum(!is.na(schooling)) >= 3,
+                               round(cor(gdp, schooling, use = "complete.obs"), 3), NA),
+    cor_gdp_gini      = ifelse(sum(!is.na(gini)) >= 3,
+                               round(cor(gdp, gini, use = "complete.obs"), 3), NA)
+  )
+
+kable(cor_table,
+      caption = "Corrélations de Pearson par pays",
+      col.names = c("Pays", "PIB ~ Scolarisation", "PIB ~ Gini")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  row_spec(which(cor_table$Entity == "Turkey"), bold = TRUE, background = "#fff3f3")
+```
+
+**Observations clés :**
+
+- La Turquie présente une corrélation très forte entre PIB et scolarisation (r = 0,972), similaire à la France (0,973), l'Allemagne (0,963) et l'Iran (0,967).
+- La corrélation PIB ~ Gini pour la Turquie (0,449) suggère que la croissance économique s'est accompagnée d'une augmentation modérée des inégalités.
+- La Syrie présente une corrélation négative PIB ~ Scolarisation (-0,263), probablement due à l'effondrement du PIB pendant la guerre civile tandis que les indicateurs éducatifs restaient relativement stables.
+
+## Analyse de Régression
+
+### Modèle 1 — PIB ~ Scolarisation
+
+```{r model-schooling}
+# Régression linéaire simple : l'éducation prédit-elle le PIB ?
+model_schooling <- lm(gdp ~ schooling, data = analysis_data)
+summary(model_schooling)
+```
+
+**Interprétation :** Chaque année de scolarisation supplémentaire est associée à une augmentation
+moyenne de **5 780 USD** du PIB par habitant. Le modèle explique **60,4 %** de la variance du PIB
+(R² = 0,604). La p-valeur est extrêmement faible (< 2,2e-16), confirmant la significativité statistique.
+
+### Modèle 2 — PIB ~ Gini
+
+```{r model-gini}
+# Régression linéaire simple : les inégalités prédisent-elles le PIB ?
+model_gini <- lm(gdp ~ gini, data = analysis_data)
+summary(model_gini)
+```
+
+**Interprétation :** Le coefficient de Gini seul n'explique que **15,9 %** de la variance du PIB
+(R² = 0,159). Le coefficient négatif (-177 033) suggère qu'une inégalité plus élevée est associée
+à un PIB plus faible, mais le pouvoir explicatif du modèle est faible.
+
+### Modèle 3 — PIB ~ Scolarisation + Gini
+
+```{r model-full}
+# Régression multiple : les deux variables ensemble
+model_full <- lm(gdp ~ schooling + gini, data = analysis_data)
+summary(model_full)
+```
+
+**Interprétation :** En combinant les deux variables, le R² tombe à **0,440** par rapport au Modèle 1.
+Cela s'explique par le fait que de nombreuses observations avec des données Gini manquantes sont
+exclues du modèle, réduisant la taille de l'échantillon de 79 à 51 observations. La scolarisation
+reste très significative (p < 0,001) tandis que le Gini n'est pas significatif (p = 0,116) une fois
+la scolarisation contrôlée.
+
+---
+
+# Conclusion
+
+Cette analyse a comparé le PIB par habitant, le niveau d'éducation et les inégalités de revenus
+de la Turquie par rapport à ses voisins et à cinq grandes économies européennes sur la période 1990–2020.
+
+**Principaux résultats :**
+
+- Le PIB par habitant de la Turquie a connu une croissance significative sur la période, dépassant
+  la plupart de ses voisins mais restant bien en dessous des grandes économies européennes.
+- Les années moyennes de scolarisation en Turquie ont augmenté régulièrement, reflétant un
+  investissement public soutenu dans l'éducation. En 2020, le niveau éducatif turc était comparable
+  à celui de l'Iran et de la Bulgarie, mais encore inférieur à celui de la Grèce et des économies européennes.
+- Le coefficient de Gini de la Turquie est resté relativement élevé (environ 0,40–0,43) par rapport
+  aux pays européens, indiquant des inégalités de revenus persistantes malgré la croissance économique.
+- L'analyse de régression confirme que l'éducation est le meilleur prédicteur du PIB par habitant
+  dans cet échantillon (R² = 0,604, p < 0,001), avec chaque année de scolarisation supplémentaire
+  associée à environ 5 780 USD de PIB par habitant supplémentaire.
+
+**Limites :**
+
+- Les données de scolarisation ne sont disponibles que tous les 5 ans ; une interpolation linéaire
+  a été utilisée pour la visualisation.
+- Les données Gini sont très incomplètes pour plusieurs pays (Azerbaïdjan, Irak, Syrie).
+- La corrélation et la régression n'impliquent pas de causalité.
+- Le PIB par habitant au niveau national masque les disparités régionales internes.
+
+**Perspectives :**
+
+- Intégrer des données régionales (par exemple les régions NUTS pour la Turquie et les pays de l'UE).
+- Analyser les écarts de genre dans l'éducation et leur relation avec les inégalités.
+- Étendre la période jusqu'en 2024 en utilisant les données GDP disponibles.
+
+---
+
+# Références
+
+- Eurostat, OCDE, FMI et Banque Mondiale (2026). *PIB par habitant – Banque Mondiale – En dollars internationaux constants*. Our World in Data. https://ourworldindata.org/grapher/gdp-per-capita-worldbank
+
+- Lee, J.-W. et Lee, H. (2016). Human capital in the long run. *Journal of Development Economics*, 122, 147–169.
+
+- R Core Team (2024). *R : un environnement de langage et de calcul statistique*. R Foundation for Statistical Computing, Vienne, Autriche.
+
+- Wickham, H. et al. (2019). Welcome to the tidyverse. *Journal of Open Source Software*, 4(43), 1686.
+
+- Zeileis, A. et Grothendieck, G. (2005). zoo: S3 infrastructure for regular and irregular time series. *Journal of Statistical Software*, 14(6), 1–27.
